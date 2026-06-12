@@ -229,7 +229,7 @@ func (m Model) renderTabContent(width int) string {
 		if value == "" {
 			return
 		}
-		keyStyle := m.Styles.DetailKey.Width(16)
+		keyStyle := m.Styles.DetailKey.Width(18)
 		valueStyle := m.Styles.DetailValue
 		row := lipgloss.JoinHorizontal(lipgloss.Left,
 			keyStyle.Render(key),
@@ -238,18 +238,34 @@ func (m Model) renderTabContent(width int) string {
 		b.WriteString(row + "\n")
 	}
 
+	// kvDN renders one entry from a pkix.Name.Names slice.
+	kvDN := func(oidStr string, val any) {
+		label := dnAttributeLabel(oidStr)
+		var valueStr string
+		switch v := val.(type) {
+		case string:
+			valueStr = v
+		default:
+			valueStr = fmt.Sprintf("%v", v)
+		}
+		kv(label, valueStr)
+	}
+
 	switch m.tabs[m.activeTab] {
 	case "Subject":
-		kv("CN", cert.Certificate.Subject.CommonName)
-		kv("Organization", strings.Join(cert.Certificate.Subject.Organization, ", "))
-		kv("OU", strings.Join(cert.Certificate.Subject.OrganizationalUnit, ", "))
-		kv("Country", strings.Join(cert.Certificate.Subject.Country, ", "))
-		kv("Province", strings.Join(cert.Certificate.Subject.Province, ", "))
-		kv("Locality", strings.Join(cert.Certificate.Subject.Locality, ", "))
+		if len(cert.Certificate.Subject.Names) == 0 {
+			b.WriteString(m.Styles.Dimmed.Render("  No subject attributes"))
+		}
+		for _, atv := range cert.Certificate.Subject.Names {
+			kvDN(atv.Type.String(), atv.Value)
+		}
 	case "Issuer":
-		kv("CN", cert.Certificate.Issuer.CommonName)
-		kv("Organization", strings.Join(cert.Certificate.Issuer.Organization, ", "))
-		kv("Country", strings.Join(cert.Certificate.Issuer.Country, ", "))
+		if len(cert.Certificate.Issuer.Names) == 0 {
+			b.WriteString(m.Styles.Dimmed.Render("  No issuer attributes"))
+		}
+		for _, atv := range cert.Certificate.Issuer.Names {
+			kvDN(atv.Type.String(), atv.Value)
+		}
 	case "Validity":
 		notBefore := cert.Certificate.NotBefore.Format("2006-01-02 15:04:05 MST")
 		notAfter := cert.Certificate.NotAfter.Format("2006-01-02 15:04:05 MST")
@@ -367,6 +383,61 @@ func (m Model) renderChainPosition(current *certificate.Info) string {
 		})
 
 	return t.Render()
+}
+
+// dnAttributeLabel maps a dotted OID string (as returned by
+// asn1.ObjectIdentifier.String()) to a short human-readable label.
+// Unknown OIDs are returned as-is so that no information is hidden.
+func dnAttributeLabel(oidStr string) string {
+	switch oidStr {
+	// Core DN attributes (RFC 5280 / X.520)
+	case "2.5.4.3":
+		return "CN"
+	case "2.5.4.4":
+		return "Surname"
+	case "2.5.4.5":
+		return "SERIALNUMBER"
+	case "2.5.4.6":
+		return "Country"
+	case "2.5.4.7":
+		return "Locality"
+	case "2.5.4.8":
+		return "Province"
+	case "2.5.4.9":
+		return "Street"
+	case "2.5.4.10":
+		return "Organization"
+	case "2.5.4.11":
+		return "OU"
+	case "2.5.4.12":
+		return "Title"
+	case "2.5.4.17":
+		return "Postal Code"
+	case "2.5.4.42":
+		return "Given Name"
+	case "2.5.4.43":
+		return "Initials"
+	case "2.5.4.65":
+		return "Pseudonym"
+	case "2.5.4.97":
+		return "Org Identifier"
+	// Internet / LDAP extras
+	case "0.9.2342.19200300.100.1.1":
+		return "UID"
+	case "0.9.2342.19200300.100.1.25":
+		return "DC"
+	case "1.2.840.113549.1.9.1":
+		return "Email"
+	// eIDAS / ETSI
+	case "1.3.6.1.4.1.311.60.2.1.1":
+		return "Jurisdiction L"
+	case "1.3.6.1.4.1.311.60.2.1.2":
+		return "Jurisdiction ST"
+	case "1.3.6.1.4.1.311.60.2.1.3":
+		return "Jurisdiction C"
+	default:
+		return oidStr
+	}
 }
 
 func getStatusIconAndStyle(certInfo *certificate.Info, styles Styles) (string, lipgloss.Style) {
