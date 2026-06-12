@@ -266,6 +266,83 @@ func isCurveRelatedError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "elliptic curve")
 }
 
+// ── PKCS7 / P7B brainpool fallback ──────────────────────────────────────────
+
+// p7ContentInfo is the outer PKCS#7 wrapper (RFC 5652).
+type p7ContentInfo struct {
+	ContentType asn1.ObjectIdentifier
+	Content     asn1.RawValue `asn1:"explicit,optional,tag:0"`
+}
+
+// p7SignedData is the SignedData payload inside ContentInfo.
+type p7SignedData struct {
+	Version          int
+	DigestAlgorithms asn1.RawValue `asn1:"set"`
+	EncapContentInfo asn1.RawValue
+	Certificates     asn1.RawValue `asn1:"optional,tag:0"`
+	CRLs             asn1.RawValue `asn1:"optional,tag:1"`
+	SignerInfos      asn1.RawValue `asn1:"set"`
+}
+
+// parsePKCS7DERBrainpoolFallback manually extracts every certificate DER blob
+// from a PKCS#7 SignedData structure and parses each one individually,
+// applying parseBrainpoolCertificate when x509.ParseCertificate fails with an
+// unsupported-curve error. This handles P7B bundles that contain brainpool
+// certificates (or a mix of brainpool and NIST certs).
+func parsePKCS7DERBrainpoolFallback(data []byte) ([]*Info, error) {
+	var ci p7ContentInfo
+	if _, err := asn1.Unmarshal(data, &ci); err != nil {
+		return nil, fmt.Errorf("brainpool p7b: failed to parse ContentInfo: %w", err)
+	}
+
+	var sd p7SignedData
+	if _, err := asn1.Unmarshal(ci.Content.Bytes, &sd); err != nil {
+		return nil, fmt.Errorf("brainpool p7b: failed to parse SignedData: %w", err)
+	}
+
+	if len(sd.Certificates.Bytes) == 0 {
+		return nil, fmt.Errorf("brainpool p7b: no certificates in PKCS7 structure")
+	}
+
+	var certs []*Info
+	rest := sd.Certificates.Bytes
+	index := 0
+
+	for len(rest) > 0 {
+		var rawCert asn1.RawValue
+		remaining, err := asn1.Unmarshal(rest, &rawCert)
+		if err != nil {
+			break
+		}
+
+		crt, parseErr := x509.ParseCertificate(rawCert.FullBytes)
+		if parseErr != nil && isCurveRelatedError(parseErr) {
+			crt, parseErr = parseBrainpoolCertificate(rawCert.FullBytes)
+		}
+		if parseErr != nil {
+			logger.Warn("brainpool p7b: skipping unparseable certificate",
+				zap.Int("index", index), zap.Error(parseErr))
+			rest = remaining
+			index++
+			continue
+		}
+
+		certs = append(certs, &Info{
+			Certificate: crt,
+			Index:       index,
+			Label:       generateCertificateLabel(crt, index),
+		})
+		index++
+		rest = remaining
+	}
+
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("brainpool p7b: no valid certificates found in PKCS7 structure")
+	}
+
+	return certs, nil
+}
+
 // ── ASN.1 types for manual certificate parsing ───────────────────────────────
 
 type bpRawCertificate struct {

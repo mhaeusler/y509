@@ -805,9 +805,15 @@ func ParseCertificates(data []byte) ([]*Info, error) {
 }
 
 // parsePKCS7DER parses certificates from a DER-encoded PKCS#7 / P7B structure.
+// If go.mozilla.org/pkcs7 fails with an unsupported-curve error (e.g. brainpool),
+// it falls back to a manual ASN.1 extractor that parses each certificate
+// individually with brainpool support.
 func parsePKCS7DER(data []byte) ([]*Info, error) {
 	p7, err := pkcs7.Parse(data)
 	if err != nil {
+		if isCurveRelatedError(err) {
+			return parsePKCS7DERBrainpoolFallback(data)
+		}
 		return nil, fmt.Errorf("failed to parse PKCS7 structure: %w", err)
 	}
 

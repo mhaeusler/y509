@@ -1045,3 +1045,68 @@ func TestBrainpoolDERParse(t *testing.T) {
 		t.Fatalf("expected 1 cert, got %d", len(certs))
 	}
 }
+
+// TestParseBrainpoolP7BPEM verifies that a PEM-encoded PKCS#7 bundle whose
+// certificates use brainpool curves is parsed correctly.
+func TestParseBrainpoolP7BPEM(t *testing.T) {
+	// Load the two brainpool P256r1 certs from the chain file.
+	chainCerts, err := LoadCertificates("../../testdata/brainpool/brainpoolP256r1-chain.pem")
+	if err != nil {
+		t.Fatalf("LoadCertificates (chain): %v", err)
+	}
+	if len(chainCerts) < 2 {
+		t.Fatalf("expected at least 2 certs in chain, got %d", len(chainCerts))
+	}
+
+	// Build a P7B that contains both brainpool certs.
+	rawCerts := make([]*x509.Certificate, len(chainCerts))
+	for i, c := range chainCerts {
+		rawCerts[i] = c.Certificate
+	}
+	p7der, err := buildDegeneratePKCS7(rawCerts)
+	if err != nil {
+		t.Fatalf("buildDegeneratePKCS7: %v", err)
+	}
+
+	// Wrap in PEM.
+	p7pem := pem.EncodeToMemory(&pem.Block{Type: "PKCS7", Bytes: p7der})
+
+	// Parse – this must succeed and return both certs.
+	parsed, err := ParseCertificates(p7pem)
+	if err != nil {
+		t.Fatalf("ParseCertificates (brainpool P7B PEM): %v", err)
+	}
+	if len(parsed) != len(chainCerts) {
+		t.Fatalf("expected %d certs, got %d", len(chainCerts), len(parsed))
+	}
+	for _, c := range parsed {
+		if _, ok := c.Certificate.PublicKey.(*ecdsa.PublicKey); !ok {
+			t.Errorf("expected *ecdsa.PublicKey, got %T", c.Certificate.PublicKey)
+		}
+	}
+}
+
+// TestParseBrainpoolP7BDER verifies the same round-trip for raw DER P7B data.
+func TestParseBrainpoolP7BDER(t *testing.T) {
+	chainCerts, err := LoadCertificates("../../testdata/brainpool/brainpoolP256r1-chain.pem")
+	if err != nil {
+		t.Fatalf("LoadCertificates (chain): %v", err)
+	}
+
+	rawCerts := make([]*x509.Certificate, len(chainCerts))
+	for i, c := range chainCerts {
+		rawCerts[i] = c.Certificate
+	}
+	p7der, err := buildDegeneratePKCS7(rawCerts)
+	if err != nil {
+		t.Fatalf("buildDegeneratePKCS7: %v", err)
+	}
+
+	parsed, err := ParseCertificates(p7der)
+	if err != nil {
+		t.Fatalf("ParseCertificates (brainpool P7B DER): %v", err)
+	}
+	if len(parsed) != len(chainCerts) {
+		t.Fatalf("expected %d certs, got %d", len(chainCerts), len(parsed))
+	}
+}
