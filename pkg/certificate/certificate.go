@@ -266,7 +266,7 @@ func FormatCertificateSummary(cert *Info) string {
 	var details strings.Builder
 
 	// Serial Number
-	details.WriteString(fmt.Sprintf("Serial Number: %s\n", cert.Certificate.SerialNumber.String()))
+	details.WriteString(fmt.Sprintf("Serial Number: %s\n", FormatSerial(cert.Certificate.SerialNumber)))
 
 	// Subject
 	details.WriteString("\nSubject:\n")
@@ -999,6 +999,26 @@ func FormatSAN(cert *x509.Certificate) string {
 	}
 
 	return details.String()
+}
+
+// FormatSerial formats a certificate serial number as colon-separated
+// lowercase hex (the industry-standard representation used by OpenSSL and
+// browsers) followed by the decimal value in parentheses.
+//
+// Example: "01:a3:ff:00:2c  (27393024044)"
+func FormatSerial(serial *big.Int) string {
+	if serial == nil {
+		return ""
+	}
+	h := serial.Text(16)
+	if len(h)%2 != 0 {
+		h = "0" + h
+	}
+	parts := make([]string, len(h)/2)
+	for i := range parts {
+		parts[i] = h[2*i : 2*i+2]
+	}
+	return strings.Join(parts, ":") + "  (" + serial.String() + ")"
 }
 
 // FormatFingerprint formats certificate fingerprint

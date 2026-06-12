@@ -321,7 +321,7 @@ func (m Model) renderTabContent(width int) string {
 			b.WriteString(m.Styles.Dimmed.Render("  No SANs present"))
 		}
 	case "Misc":
-		kv("Serial", cert.Certificate.SerialNumber.String())
+		kv("Serial", certificate.FormatSerial(cert.Certificate.SerialNumber))
 		kv("SHA256", certificate.FormatFingerprint(cert.Certificate))
 		kv("Sig Algo", cert.Certificate.SignatureAlgorithm.String())
 		b.WriteString("\n")

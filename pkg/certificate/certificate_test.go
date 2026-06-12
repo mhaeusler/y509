@@ -637,6 +637,58 @@ func TestFormatFingerprint(t *testing.T) {
 	}
 }
 
+func TestFormatSerial(t *testing.T) {
+	tests := []struct {
+		name    string
+		serial  *big.Int
+		wantHex string // expected colon-separated hex prefix
+		wantDec string // expected decimal value in parens
+	}{
+		{
+			name:    "small decimal",
+			serial:  big.NewInt(1),
+			wantHex: "01",
+			wantDec: "(1)",
+		},
+		{
+			name:    "multi-byte value",
+			serial:  big.NewInt(0x0102),
+			wantHex: "01:02",
+			wantDec: "(258)",
+		},
+		{
+			name:    "odd hex digit count gets zero-padded",
+			serial:  big.NewInt(0xf),
+			wantHex: "0f",
+			wantDec: "(15)",
+		},
+		{
+			name:    "nil serial",
+			serial:  nil,
+			wantHex: "",
+			wantDec: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSerial(tt.serial)
+			if tt.serial == nil {
+				if got != "" {
+					t.Errorf("FormatSerial(nil) = %q, want empty string", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantHex) {
+				t.Errorf("FormatSerial hex: got %q, want it to contain %q", got, tt.wantHex)
+			}
+			if !strings.Contains(got, tt.wantDec) {
+				t.Errorf("FormatSerial decimal: got %q, want it to contain %q", got, tt.wantDec)
+			}
+		})
+	}
+}
+
 func TestFormatPublicKey(t *testing.T) {
 	tests := []struct {
 		name     string
