@@ -2,6 +2,7 @@
 package certificate
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mozilla.org/pkcs7"
 	"go.uber.org/zap"
 )
 
@@ -348,6 +350,10 @@ func FormatCertificateKeyInfo(cert *Info) string {
 		details.WriteString("Type: ECDSA\n")
 		details.WriteString(fmt.Sprintf("Curve: %s\n", curveName))
 		details.WriteString(fmt.Sprintf("Key Size: %d bits\n", keySize))
+		switch curveName {
+		case "brainpoolP256r1", "brainpoolP384r1", "brainpoolP512r1":
+			details.WriteString("Standard: RFC 5639 (Brainpool)\n")
+		}
 	case ed25519.PublicKey:
 		details.WriteString("Type: Ed25519\n")
 		details.WriteString("Key Size: 256 bits\n")
@@ -606,11 +612,34 @@ func ExportCertificate(cert *x509.Certificate, format string, filename string) e
 		if _, err := file.Write(cert.Raw); err != nil {
 			return fmt.Errorf("failed to write DER: %v", err)
 		}
+	case "p7b", "pkcs7":
+		p7data, err := buildDegeneratePKCS7([]*x509.Certificate{cert})
+		if err != nil {
+			return fmt.Errorf("failed to create P7B: %v", err)
+		}
+		if err := pem.Encode(file, &pem.Block{Type: "PKCS7", Bytes: p7data}); err != nil {
+			return fmt.Errorf("failed to encode P7B: %v", err)
+		}
 	default:
-		return fmt.Errorf("unsupported format: %s (supported: pem, der)", f)
+		return fmt.Errorf("unsupported format: %s (supported: pem, der, p7b)", f)
 	}
 
 	return nil
+}
+
+// buildDegeneratePKCS7 creates a DER-encoded degenerate PKCS#7 SignedData
+// structure that contains only certificates (no signers).
+func buildDegeneratePKCS7(certs []*x509.Certificate) ([]byte, error) {
+	sd, err := pkcs7.NewSignedData(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SignedData: %w", err)
+	}
+
+	for _, cert := range certs {
+		sd.AddCertificate(cert)
+	}
+
+	return sd.Finish()
 }
 
 // GenerateSelfSignedCert generates a self-signed certificate
@@ -707,11 +736,22 @@ func GenerateSelfSignedCert(host string, certFile, keyFile string) error {
 	return nil
 }
 
-// ParseCertificates parses PEM blocks and extracts certificates
+// ParseCertificates parses certificates from PEM or binary DER data.
+// It supports PEM-encoded certificates, DER-encoded certificates, and
+// PKCS#7 / P7B files (both PEM-armored and raw DER).
 func ParseCertificates(data []byte) ([]*Info, error) {
+	if isBinaryCertificate(data) {
+		trimmed := bytes.TrimLeft(data, " \t\r\n")
+		// Try PKCS7 first; fall back to plain DER certificate(s).
+		if certs, err := parsePKCS7DER(trimmed); err == nil {
+			return certs, nil
+		}
+		return parseDERCertificates(data)
+	}
+
 	var certs []*Info
 	rest := data
-	index := 0
+	certIndex := 0
 
 	for {
 		block, remaining := pem.Decode(rest)
@@ -719,28 +759,112 @@ func ParseCertificates(data []byte) ([]*Info, error) {
 			break
 		}
 
-		if block.Type == "CERTIFICATE" {
+		switch block.Type {
+		case "CERTIFICATE":
 			crt, err := x509.ParseCertificate(block.Bytes)
 			if err != nil {
-				logger.Error("Failed to parse certificate", zap.Error(err))
-				return nil, fmt.Errorf("failed to parse certificate %d: %w", index, err)
+				if isCurveRelatedError(err) {
+					crt, err = parseBrainpoolCertificate(block.Bytes)
+				}
+				if err != nil {
+					logger.Error("Failed to parse certificate", zap.Error(err))
+					return nil, fmt.Errorf("failed to parse certificate %d: %w", certIndex, err)
+				}
 			}
-
-			label := generateCertificateLabel(crt, index)
+			label := generateCertificateLabel(crt, certIndex)
 			certs = append(certs, &Info{
 				Certificate: crt,
-				Index:       index,
+				Index:       certIndex,
 				Label:       label,
 			})
+			certIndex++
+
+		case "PKCS7":
+			p7certs, err := parsePKCS7DER(block.Bytes)
+			if err != nil {
+				logger.Error("Failed to parse PKCS7 PEM block", zap.Error(err))
+				return nil, fmt.Errorf("failed to parse PKCS7 block: %w", err)
+			}
+			for _, c := range p7certs {
+				c.Index = certIndex
+				c.Label = generateCertificateLabel(c.Certificate, certIndex)
+				certs = append(certs, c)
+				certIndex++
+			}
 		}
 
 		rest = remaining
-		index++
 	}
 
 	if len(certs) == 0 {
 		logger.Error("No certificates found in input")
 		return nil, fmt.Errorf("no certificates found in input")
+	}
+
+	return certs, nil
+}
+
+// parsePKCS7DER parses certificates from a DER-encoded PKCS#7 / P7B structure.
+func parsePKCS7DER(data []byte) ([]*Info, error) {
+	p7, err := pkcs7.Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse PKCS7 structure: %w", err)
+	}
+
+	if len(p7.Certificates) == 0 {
+		return nil, fmt.Errorf("no certificates found in PKCS7 structure")
+	}
+
+	certs := make([]*Info, 0, len(p7.Certificates))
+	for i, crt := range p7.Certificates {
+		certs = append(certs, &Info{
+			Certificate: crt,
+			Index:       i,
+			Label:       generateCertificateLabel(crt, i),
+		})
+	}
+
+	return certs, nil
+}
+
+// isBinaryCertificate reports whether data looks like DER-encoded ASN.1
+// rather than PEM. DER certificates start with a SEQUENCE tag (0x30).
+func isBinaryCertificate(data []byte) bool {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == 0x30
+}
+
+// parseDERCertificates parses one or more concatenated DER-encoded certificates
+func parseDERCertificates(data []byte) ([]*Info, error) {
+	parsed, err := x509.ParseCertificates(data)
+	if err != nil {
+		// Single-cert brainpool fallback
+		if isCurveRelatedError(err) {
+			crt, bpErr := parseBrainpoolCertificate(data)
+			if bpErr == nil {
+				return []*Info{{
+					Certificate: crt,
+					Index:       0,
+					Label:       generateCertificateLabel(crt, 0),
+				}}, nil
+			}
+		}
+		logger.Error("Failed to parse DER certificate", zap.Error(err))
+		return nil, fmt.Errorf("failed to parse DER certificate: %w", err)
+	}
+
+	if len(parsed) == 0 {
+		logger.Error("No certificates found in input")
+		return nil, fmt.Errorf("no certificates found in input")
+	}
+
+	certs := make([]*Info, 0, len(parsed))
+	for index, crt := range parsed {
+		certs = append(certs, &Info{
+			Certificate: crt,
+			Index:       index,
+			Label:       generateCertificateLabel(crt, index),
+		})
 	}
 
 	return certs, nil
@@ -907,6 +1031,8 @@ func FormatPublicKey(cert *x509.Certificate) string {
 			details.WriteString("Standard: NIST P-384\n")
 		case "P-521":
 			details.WriteString("Standard: NIST P-521\n")
+		case "brainpoolP256r1", "brainpoolP384r1", "brainpoolP512r1":
+			details.WriteString("Standard: RFC 5639 (Brainpool)\n")
 		}
 	case ed25519.PublicKey:
 		details.WriteString("Type: Ed25519\n")

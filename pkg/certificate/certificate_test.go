@@ -278,6 +278,49 @@ func TestParseCertificates(t *testing.T) {
 	}
 }
 
+func TestParseCertificatesDER(t *testing.T) {
+	leaf, root, _, _ := generateTestChain()
+
+	tests := []struct {
+		name        string
+		input       []byte
+		expectCount int
+	}{
+		{
+			name:        "Single DER certificate",
+			input:       leaf.Raw,
+			expectCount: 1,
+		},
+		{
+			name:        "Concatenated DER certificates",
+			input:       append(append([]byte{}, leaf.Raw...), root.Raw...),
+			expectCount: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			certs, err := ParseCertificates(tt.input)
+			if err != nil {
+				t.Fatalf("Unexpected error parsing DER certificates: %v", err)
+			}
+			if len(certs) != tt.expectCount {
+				t.Fatalf("Expected %d certificates, got %d", tt.expectCount, len(certs))
+			}
+			for i, cert := range certs {
+				if cert.Certificate == nil {
+					t.Errorf("Certificate %d is nil", i)
+				}
+				if cert.Index != i {
+					t.Errorf("Certificate %d has wrong index: %d", i, cert.Index)
+				}
+				if cert.Label == "" {
+					t.Errorf("Certificate %d has empty label", i)
+				}
+			}
+		})
+	}
+}
+
 func TestGenerateCertificateLabel(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -734,6 +777,16 @@ func TestExportCertificate(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name:        "P7B format",
+			format:      "p7b",
+			expectError: false,
+		},
+		{
+			name:        "PKCS7 format alias",
+			format:      "pkcs7",
+			expectError: false,
+		},
+		{
 			name:        "Invalid format",
 			format:      "invalid",
 			expectError: true,
@@ -763,5 +816,232 @@ func TestExportCertificate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestParseCertificatesPKCS7PEM verifies that PEM-armored PKCS7 / P7B files are parsed correctly.
+func TestParseCertificatesPKCS7PEM(t *testing.T) {
+	leaf, root, _, _ := generateTestChain()
+
+	// Build a degenerate PKCS7 that contains both certs.
+	p7der, err := buildDegeneratePKCS7([]*x509.Certificate{leaf, root})
+	if err != nil {
+		t.Fatalf("buildDegeneratePKCS7: %v", err)
+	}
+
+	// PEM-encode as "PKCS7".
+	p7pem := string(pem.EncodeToMemory(&pem.Block{Type: "PKCS7", Bytes: p7der}))
+
+	certs, err := ParseCertificates([]byte(p7pem))
+	if err != nil {
+		t.Fatalf("ParseCertificates (PEM PKCS7): %v", err)
+	}
+	if len(certs) != 2 {
+		t.Fatalf("Expected 2 certificates, got %d", len(certs))
+	}
+	for i, c := range certs {
+		if c.Certificate == nil {
+			t.Errorf("Certificate %d is nil", i)
+		}
+		if c.Index != i {
+			t.Errorf("Certificate %d has wrong Index: got %d", i, c.Index)
+		}
+		if c.Label == "" {
+			t.Errorf("Certificate %d has empty Label", i)
+		}
+	}
+}
+
+// TestParseCertificatesPKCS7DER verifies that raw DER-encoded PKCS7 / P7B data is parsed correctly.
+func TestParseCertificatesPKCS7DER(t *testing.T) {
+	leaf, root, _, _ := generateTestChain()
+
+	p7der, err := buildDegeneratePKCS7([]*x509.Certificate{leaf, root})
+	if err != nil {
+		t.Fatalf("buildDegeneratePKCS7: %v", err)
+	}
+
+	certs, err := ParseCertificates(p7der)
+	if err != nil {
+		t.Fatalf("ParseCertificates (DER PKCS7): %v", err)
+	}
+	if len(certs) != 2 {
+		t.Fatalf("Expected 2 certificates, got %d", len(certs))
+	}
+}
+
+// TestLoadCertificatesP7BFile verifies that LoadCertificates handles a .p7b file on disk.
+func TestLoadCertificatesP7BFile(t *testing.T) {
+	leaf, root, _, _ := generateTestChain()
+
+	p7der, err := buildDegeneratePKCS7([]*x509.Certificate{leaf, root})
+	if err != nil {
+		t.Fatalf("buildDegeneratePKCS7: %v", err)
+	}
+
+	// Write PEM-encoded P7B to a temp file with .p7b extension.
+	tmpFile, err := os.CreateTemp("", "test-*.p7b")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+
+	if err := pem.Encode(tmpFile, &pem.Block{Type: "PKCS7", Bytes: p7der}); err != nil {
+		t.Fatalf("pem.Encode: %v", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	certs, err := LoadCertificates(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("LoadCertificates: %v", err)
+	}
+	if len(certs) != 2 {
+		t.Fatalf("Expected 2 certificates, got %d", len(certs))
+	}
+}
+
+// TestExportAndReloadP7B verifies the round-trip: export a cert as P7B, then reload it.
+func TestExportAndReloadP7B(t *testing.T) {
+	_, root, _, _ := generateTestChain()
+
+	tmpFile, err := os.CreateTemp("", "test-export-*.p7b")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := ExportCertificate(root, "p7b", tmpFile.Name()); err != nil {
+		t.Fatalf("ExportCertificate (p7b): %v", err)
+	}
+
+	certs, err := LoadCertificates(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("LoadCertificates after P7B export: %v", err)
+	}
+	if len(certs) != 1 {
+		t.Fatalf("Expected 1 certificate after reload, got %d", len(certs))
+	}
+	if certs[0].Certificate.Subject.CommonName != root.Subject.CommonName {
+		t.Errorf("Subject mismatch: got %q, want %q",
+			certs[0].Certificate.Subject.CommonName, root.Subject.CommonName)
+	}
+}
+
+// ── Brainpool tests ──────────────────────────────────────────────────────────
+
+// brainpoolTestFiles maps a curve name to a PEM file with a self-signed cert.
+var brainpoolTestFiles = map[string]string{
+	"brainpoolP256r1": "../../testdata/brainpool/brainpoolP256r1-cert.pem",
+	"brainpoolP384r1": "../../testdata/brainpool/brainpoolP384r1-cert.pem",
+	"brainpoolP512r1": "../../testdata/brainpool/brainpoolP512r1-cert.pem",
+}
+
+func TestParseBrainpoolCertificatesPEM(t *testing.T) {
+	for curveName, filename := range brainpoolTestFiles {
+		t.Run(curveName, func(t *testing.T) {
+			certs, err := LoadCertificates(filename)
+			if err != nil {
+				t.Fatalf("LoadCertificates(%s): %v", filename, err)
+			}
+			if len(certs) != 1 {
+				t.Fatalf("expected 1 cert, got %d", len(certs))
+			}
+			c := certs[0]
+			if c.Certificate == nil {
+				t.Fatal("Certificate is nil")
+			}
+			if c.Certificate.PublicKeyAlgorithm != x509.ECDSA {
+				t.Errorf("PublicKeyAlgorithm: got %v, want ECDSA", c.Certificate.PublicKeyAlgorithm)
+			}
+			pub, ok := c.Certificate.PublicKey.(*ecdsa.PublicKey)
+			if !ok {
+				t.Fatalf("PublicKey type: got %T, want *ecdsa.PublicKey", c.Certificate.PublicKey)
+			}
+			if pub.Curve.Params().Name != curveName {
+				t.Errorf("curve name: got %q, want %q", pub.Curve.Params().Name, curveName)
+			}
+			if c.Label == "" {
+				t.Error("Label is empty")
+			}
+		})
+	}
+}
+
+func TestParseBrainpoolChainPEM(t *testing.T) {
+	certs, err := LoadCertificates("../../testdata/brainpool/brainpoolP256r1-chain.pem")
+	if err != nil {
+		t.Fatalf("LoadCertificates(chain): %v", err)
+	}
+	if len(certs) != 2 {
+		t.Fatalf("expected 2 certs in chain, got %d", len(certs))
+	}
+	for i, c := range certs {
+		if c.Certificate == nil {
+			t.Errorf("cert[%d] is nil", i)
+		}
+	}
+}
+
+func TestBrainpoolIsOnCurve(t *testing.T) {
+	// Parse a brainpool cert and verify the public key is on the claimed curve.
+	certs, err := LoadCertificates("../../testdata/brainpool/brainpoolP256r1-cert.pem")
+	if err != nil {
+		t.Fatalf("LoadCertificates: %v", err)
+	}
+	pub := certs[0].Certificate.PublicKey.(*ecdsa.PublicKey)
+	if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
+		t.Error("public key point is not on the brainpool curve")
+	}
+}
+
+func TestBrainpoolValidateChainLinks(t *testing.T) {
+	certs, err := LoadCertificates("../../testdata/brainpool/brainpoolP256r1-chain.pem")
+	if err != nil {
+		t.Fatalf("LoadCertificates: %v", err)
+	}
+	ValidateChainLinks(certs)
+	for _, c := range certs {
+		if c.ValidationStatus == StatusInvalidSignature {
+			t.Errorf("cert %q: unexpected StatusInvalidSignature: %v",
+				c.Certificate.Subject.CommonName, c.ValidationError)
+		}
+	}
+}
+
+func TestBrainpoolFormatPublicKey(t *testing.T) {
+	certs, err := LoadCertificates("../../testdata/brainpool/brainpoolP256r1-cert.pem")
+	if err != nil {
+		t.Fatalf("LoadCertificates: %v", err)
+	}
+	out := FormatPublicKey(certs[0].Certificate)
+	if !strings.Contains(out, "brainpoolP256r1") {
+		t.Errorf("FormatPublicKey output missing curve name: %q", out)
+	}
+	if !strings.Contains(out, "RFC 5639") {
+		t.Errorf("FormatPublicKey output missing RFC 5639 standard: %q", out)
+	}
+}
+
+func TestBrainpoolDERParse(t *testing.T) {
+	// Load PEM, decode to DER, verify ParseCertificates handles raw DER.
+	data, err := os.ReadFile("../../testdata/brainpool/brainpoolP256r1-cert.pem")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		t.Fatal("pem.Decode returned nil")
+	}
+	certs, err := ParseCertificates(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificates (DER brainpool): %v", err)
+	}
+	if len(certs) != 1 {
+		t.Fatalf("expected 1 cert, got %d", len(certs))
 	}
 }
